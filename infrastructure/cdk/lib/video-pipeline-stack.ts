@@ -46,5 +46,15 @@ export class VideoPipelineStack extends cdk.Stack {
       s3.EventType.OBJECT_CREATED,
       new s3n.SqsDestination(videoQueue)
     );
+
+    // 5. DynamoDB Table for Metadata
+    const videoMetadataTable = new dynamodb.Table(this, "VideoMetadataTable", {
+      tableName: "VideoMetadata",
+      partitionKey: { name: "videoId", type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST, // On-demand pricing
+      removalPolicy: cdk.RemovalPolicy.DESTROY, // NOT for production! Safe for dev
+    });
+
+    videoMetadataTable.grantWriteData(processorFn);
   }
 }
