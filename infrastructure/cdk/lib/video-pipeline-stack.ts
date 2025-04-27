@@ -56,5 +56,10 @@ export class VideoPipelineStack extends cdk.Stack {
     });
 
     videoMetadataTable.grantWriteData(processorFn);
+
+    new cdk.CfnOutput(this, "VideoMetadataTableName", {
+      value: videoMetadataTable.tableName,
+      description: "The name of the DynamoDB Video Metadata table",
+    });
   }
 }
