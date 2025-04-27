@@ -1,7 +1,6 @@
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
 import * as s3 from "aws-cdk-lib/aws-s3";
-import * as sqs from "aws-cdk-lib/aws-sqs";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as s3n from "aws-cdk-lib/aws-s3-notifications";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
@@ -21,11 +20,6 @@ export class VideoPipelineStack extends cdk.Stack {
       autoDeleteObjects: true,
     });
 
-    // 📬 2. SQS Queue
-    const videoQueue = new sqs.Queue(this, "VideoProcessingQueue", {
-      visibilityTimeout: cdk.Duration.minutes(15),
-    });
-
     // 🗂️ 3. DynamoDB Table
     const videoMetadataTable = new dynamodb.Table(this, "VideoMetadataTable", {
       tableName: "VideoMetadata",
@@ -34,23 +28,9 @@ export class VideoPipelineStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    // 🚀 4. Lambda Function
-    const processorFn = new lambda.Function(this, "VideoProcessorFunction", {
-      runtime: lambda.Runtime.NODEJS_18_X,
-      handler: "processor.handler",
-      code: lambda.Code.fromAsset(
-        path.join(__dirname, "../../../services/lambda")
-      ),
-      environment: {
-        QUEUE_URL: videoQueue.queueUrl,
-        METADATA_TABLE: videoMetadataTable.tableName,
-        UPLOAD_BUCKET: uploadBucket.bucketName,
-      },
-    });
-
-    const startTranscribeLambda = new lambda.Function(
+    const transcribeStartLambda = new lambda.Function(
       this,
-      "StartTranscribeLambda",
+      "startTranscribeLambda",
       {
         runtime: lambda.Runtime.NODEJS_18_X,
         handler: "index.handler",
@@ -63,9 +43,9 @@ export class VideoPipelineStack extends cdk.Stack {
       }
     );
 
-    const checkTranscribeStatusLambda = new lambda.Function(
+    const transcribeStatusCheckLambda = new lambda.Function(
       this,
-      "CheckTranscribeStatusLambda",
+      "transcribeStatusCheckLambda",
       {
         runtime: lambda.Runtime.NODEJS_18_X,
         handler: "index.handler",
@@ -81,43 +61,23 @@ export class VideoPipelineStack extends cdk.Stack {
       }
     );
 
-    // 🔒 5. Grant Permissions
-    videoQueue.grantSendMessages(processorFn);
-    uploadBucket.grantReadWrite(processorFn);
-    videoMetadataTable.grantWriteData(processorFn);
-
-    processorFn.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: [
-          "transcribe:StartTranscriptionJob",
-          "transcribe:GetTranscriptionJob",
-        ],
-        resources: ["*"],
-      })
-    );
-
-    startTranscribeLambda.addToRolePolicy(
+    //Grant Permissions
+    transcribeStartLambda.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["transcribe:StartTranscriptionJob"],
         resources: ["*"],
       })
     );
 
-    checkTranscribeStatusLambda.addToRolePolicy(
+    transcribeStatusCheckLambda.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ["transcribe:GetTranscriptionJob"],
         resources: ["*"],
       })
     );
 
-    // 🔔 6. Notifications and Event Wiring
-    uploadBucket.addEventNotification(
-      s3.EventType.OBJECT_CREATED,
-      new s3n.SqsDestination(videoQueue)
-    );
-
     const startJob = new tasks.LambdaInvoke(this, "Start Transcribe Job", {
-      lambdaFunction: startTranscribeLambda,
+      lambdaFunction: transcribeStartLambda,
       outputPath: "$.Payload",
     });
 
@@ -129,7 +89,7 @@ export class VideoPipelineStack extends cdk.Stack {
       this,
       "Check Transcribe Job Status",
       {
-        lambdaFunction: checkTranscribeStatusLambda,
+        lambdaFunction: transcribeStatusCheckLambda,
         outputPath: "$.Payload",
       }
     );
@@ -159,6 +119,31 @@ export class VideoPipelineStack extends cdk.Stack {
         definition,
         timeout: cdk.Duration.minutes(30),
       }
+    );
+
+    const UploadedVideoTriggerLambda = new lambda.Function(
+      this,
+      "UploadedVideoTrigger",
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        handler: "index.handler",
+        code: lambda.Code.fromAsset(
+          path.resolve(
+            __dirname,
+            "../../../services/lambda/uploadedVideoTrigger"
+          )
+        ),
+        environment: {
+          STATE_MACHINE_ARN: stateMachine.stateMachineArn,
+        },
+      }
+    );
+
+    stateMachine.grantStartExecution(UploadedVideoTriggerLambda);
+
+    uploadBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.LambdaDestination(UploadedVideoTriggerLambda)
     );
 
     // 📤 7. Outputs
