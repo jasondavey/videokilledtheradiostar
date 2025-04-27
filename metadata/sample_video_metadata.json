@@ -1,0 +1,8 @@
+{
+  "videoId": "abc123",
+  "size": 10485760,
+  "duration": 180,
+  "transcribedWordsCount": 253,
+  "redactedWordsCount": 7,
+  "status": "processed"
+}
