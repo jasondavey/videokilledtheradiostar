@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # === Configuration ===
-BUCKET_NAME="video-sanitizer-uploads"
+BUCKET_NAME="video-sanitizer"
 
 # === Confirm Before Deleting ===
 echo "⚠️  WARNING: This will permanently delete ALL objects from the bucket: $BUCKET_NAME"
@@ -18,4 +18,9 @@ echo "🧹 Deleting all objects from s3://$BUCKET_NAME..."
 # Remove all objects
 aws s3 rm s3://$BUCKET_NAME --recursive
 
-echo "✅ All objects deleted from $BUCKET_NAME."
+# Check if deletion succeeded
+if [ $? -eq 0 ]; then
+  echo "✅ All objects deleted from $BUCKET_NAME."
+else
+  echo "❌ Failed to delete objects from $BUCKET_NAME."
+fi

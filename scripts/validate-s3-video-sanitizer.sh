@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # === Configuration ===
-BUCKET_NAME="video-sanitizer-uploads"
+BUCKET_NAME="video-sanitizer"
 OBJECT_KEY="$1"  # pass the object key (filename) as first argument
 
 # === Check if Object Key is Provided ===
