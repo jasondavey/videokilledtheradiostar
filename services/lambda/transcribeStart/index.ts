@@ -27,8 +27,11 @@ export const handler = async (event: any) => {
     throw new Error("S3 object key not found in event");
   }
 
-  const videoId = objectKey.split(".")[0];
-  const transcribeJobName = `transcribe-${videoId}-${Date.now()}`;
+  const objectKeyParts = objectKey.split("/");
+  const fileName = objectKeyParts[objectKeyParts.length - 1];
+  const baseName = fileName.split(".")[0];
+  const videoId = baseName;
+  const transcribeJobName = `transcribe-${baseName}-${Date.now()}`;
 
   const mediaFileUri = `https://${UPLOAD_BUCKET}.s3.${AWS_REGION}.amazonaws.com/${objectKey}`;
 

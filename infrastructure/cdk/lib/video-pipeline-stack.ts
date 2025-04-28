@@ -16,7 +16,7 @@ export class VideoPipelineStack extends cdk.Stack {
 
     // S3 Buckets
     const uploadBucket = new s3.Bucket(this, "UploadBucket", {
-      bucketName: `video-sanitizer-uploads`, // Ensure unique name
+      bucketName: `video-sanitizer`, // Ensure unique name
       removalPolicy: cdk.RemovalPolicy.DESTROY, // Use RETAIN for production
       autoDeleteObjects: true, // Disable for production
       objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED, // Simplify ownership
@@ -25,17 +25,27 @@ export class VideoPipelineStack extends cdk.Stack {
 
     uploadBucket.addToResourcePolicy(
       new iam.PolicyStatement({
-        actions: ["s3:GetBucketLocation", "s3:ListBucket"],
-        principals: [new iam.ServicePrincipal("transcribe.amazonaws.com")],
-        resources: [uploadBucket.bucketArn], // Bucket ONLY
+        sid: "AllowPublicReadAccess",
+        actions: ["s3:GetObject"],
+        resources: [`${uploadBucket.bucketArn}/*`], // Only objects, not bucket itself
+        principals: [new iam.AnyPrincipal()],
       })
     );
 
     uploadBucket.addToResourcePolicy(
       new iam.PolicyStatement({
-        actions: ["s3:GetObject", "s3:PutObject"],
+        sid: "AllowTranscribeFullAccessToObjects",
+        actions: [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket",
+          "s3:GetBucketLocation",
+        ],
+        resources: [
+          uploadBucket.bucketArn, // For list/get location
+          `${uploadBucket.bucketArn}/*`, // For objects
+        ],
         principals: [new iam.ServicePrincipal("transcribe.amazonaws.com")],
-        resources: [`${uploadBucket.bucketArn}/*`], // Bucket objects
       })
     );
 
@@ -121,6 +131,7 @@ export class VideoPipelineStack extends cdk.Stack {
       this,
       "VideoProcessingStateMachine",
       {
+        stateMachineName: "VideoProcessingStateMachine",
         definition,
         timeout: cdk.Duration.minutes(30),
       }
@@ -139,6 +150,34 @@ export class VideoPipelineStack extends cdk.Stack {
         handler: "handler",
       }
     );
+
+    const transcriptionProcessorLambda = new NodejsFunction(
+      this,
+      "TranscriptionProcessorLambda",
+      {
+        runtime: lambda.Runtime.NODEJS_18_X,
+        entry: path.resolve(
+          __dirname,
+          "../../../services/lambda/transcriptionProcessor/index.ts"
+        ),
+        handler: "handler",
+        environment: {
+          // Any needed environment variables here
+        },
+      }
+    );
+
+    const videoMergerLambda = new NodejsFunction(this, "VideoMergerLambda", {
+      runtime: lambda.Runtime.NODEJS_18_X,
+      entry: path.resolve(
+        __dirname,
+        "../../../services/lambda/videoMerger/index.ts"
+      ),
+      handler: "handler",
+      environment: {
+        // Optional: add things here
+      },
+    });
 
     // Add environment variable for state machine ARN after stateMachine is created
     uploadedVideoTriggerLambda.addEnvironment(
@@ -178,12 +217,30 @@ export class VideoPipelineStack extends cdk.Stack {
     // Grant bucket read permissions
     uploadBucket.grantRead(transcribeStartLambda);
     uploadBucket.grantRead(uploadedVideoTriggerLambda);
+    uploadBucket.grantReadWrite(videoMergerLambda);
+
+    // Trigger on .vtt file creation
+    uploadBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.LambdaDestination(videoMergerLambda),
+      { prefix: "subtitles/", suffix: ".vtt" }
+    );
 
     // S3 Notifications
     uploadBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
-      new s3n.LambdaDestination(uploadedVideoTriggerLambda)
+      new s3n.LambdaDestination(uploadedVideoTriggerLambda),
+      { prefix: "uploads/", suffix: ".mp4" }
     );
+
+    // Only trigger for files ending with .json
+    uploadBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.LambdaDestination(transcriptionProcessorLambda),
+      { prefix: "transcriptions/", suffix: ".json" }
+    );
+
+    uploadBucket.grantRead(transcriptionProcessorLambda);
 
     // Outputs
     new cdk.CfnOutput(this, "VideoMetadataTableName", {
