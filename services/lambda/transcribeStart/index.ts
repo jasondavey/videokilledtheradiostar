@@ -11,18 +11,19 @@ export const handler = async (event: any) => {
 
   const transcribeJobName = `transcribe-${videoId}-${Date.now()}`;
 
-  await transcribe
-    .startTranscriptionJob({
-      TranscriptionJobName: transcribeJobName,
-      LanguageCode: "en-US",
-      MediaFormat: "mp4",
-      Media: {
-        MediaFileUri: `s3://${UPLOAD_BUCKET}/${objectKey}`,
-      },
-      OutputBucketName: UPLOAD_BUCKET,
-      OutputKey: `transcriptions/${videoId}.json`,
-    })
-    .promise();
+  transcribe.startTranscriptionJob({
+    TranscriptionJobName: transcribeJobName,
+    LanguageCode: "en-US",
+    MediaFormat: "mp4",
+    Media: {
+      MediaFileUri: `s3://${UPLOAD_BUCKET}/${objectKey}`,
+    },
+    OutputBucketName: UPLOAD_BUCKET,
+    Settings: {
+      ShowSpeakerLabels: false,
+      ChannelIdentification: false,
+    },
+  });
 
   return {
     transcribeJobName,

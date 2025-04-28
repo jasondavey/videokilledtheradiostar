@@ -1,6 +1,7 @@
 import * as cdk from "aws-cdk-lib";
 import { Construct } from "constructs";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import { NodejsFunction } from "aws-cdk-lib/aws-lambda-nodejs";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as s3n from "aws-cdk-lib/aws-s3-notifications";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
@@ -13,14 +14,37 @@ export class VideoPipelineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    // 🛢️ 1. S3 Buckets
+    //S3 Buckets
     const uploadBucket = new s3.Bucket(this, "UploadBucket", {
-      bucketName: "video-sanitizer-uploads",
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
-      autoDeleteObjects: true,
+      bucketName: `video-sanitizer-uploads`, // Ensure unique name
+      removalPolicy: cdk.RemovalPolicy.DESTROY, // Use RETAIN for production
+      autoDeleteObjects: true, // Disable for production
+      objectOwnership: s3.ObjectOwnership.BUCKET_OWNER_ENFORCED, // Simplify ownership
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL, // Maximum security
     });
 
-    // 🗂️ 3. DynamoDB Table
+    uploadBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: ["s3:ListBucket", "s3:GetBucketLocation"],
+        principals: [new iam.ServicePrincipal("transcribe.amazonaws.com")],
+        resources: [uploadBucket.bucketArn],
+      })
+    );
+
+    uploadBucket.addToResourcePolicy(
+      new iam.PolicyStatement({
+        actions: [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket",
+          "s3:GetBucketAcl",
+        ],
+        resources: [uploadBucket.bucketArn, `${uploadBucket.bucketArn}/*`],
+        principals: [new iam.ServicePrincipal("transcribe.amazonaws.com")],
+      })
+    );
+
+    //DynamoDB Table
     const videoMetadataTable = new dynamodb.Table(this, "VideoMetadataTable", {
       tableName: "VideoMetadata",
       partitionKey: { name: "videoId", type: dynamodb.AttributeType.STRING },
@@ -28,33 +52,32 @@ export class VideoPipelineStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
-    const transcribeStartLambda = new lambda.Function(
+    const transcribeStartLambda = new NodejsFunction(
       this,
       "startTranscribeLambda",
       {
         runtime: lambda.Runtime.NODEJS_18_X,
-        handler: "index.handler",
-        code: lambda.Code.fromAsset(
-          path.resolve(__dirname, "../../../services/lambda/transcribeStart")
+        entry: path.resolve(
+          __dirname,
+          "../../../services/lambda/transcribeStart/index.ts"
         ),
+        handler: "handler",
         environment: {
           UPLOAD_BUCKET: uploadBucket.bucketName,
         },
       }
     );
 
-    const transcribeStatusCheckLambda = new lambda.Function(
+    const transcribeStatusCheckLambda = new NodejsFunction(
       this,
       "transcribeStatusCheckLambda",
       {
         runtime: lambda.Runtime.NODEJS_18_X,
-        handler: "index.handler",
-        code: lambda.Code.fromAsset(
-          path.resolve(
-            __dirname,
-            "../../../services/lambda/transcribeStatusCheck"
-          )
+        entry: path.resolve(
+          __dirname,
+          "../../../services/lambda/transcribeStatusCheck/index.ts"
         ),
+        handler: "handler",
         environment: {
           UPLOAD_BUCKET: uploadBucket.bucketName,
         },
@@ -121,32 +144,49 @@ export class VideoPipelineStack extends cdk.Stack {
       }
     );
 
-    const UploadedVideoTriggerLambda = new lambda.Function(
+    const uploadedVideoTriggerLambda = new NodejsFunction(
       this,
       "UploadedVideoTrigger",
       {
         runtime: lambda.Runtime.NODEJS_18_X,
-        handler: "index.handler",
-        code: lambda.Code.fromAsset(
-          path.resolve(
-            __dirname,
-            "../../../services/lambda/uploadedVideoTrigger"
-          )
+        entry: path.resolve(
+          __dirname,
+          "../../../services/lambda/uploadedVideoTrigger/index.ts"
         ),
+        handler: "handler",
         environment: {
           STATE_MACHINE_ARN: stateMachine.stateMachineArn,
         },
       }
     );
 
-    stateMachine.grantStartExecution(UploadedVideoTriggerLambda);
+    // Allow Lambda to start the State Machine
+    uploadBucket.grantRead(transcribeStartLambda);
+    uploadBucket.grantReadWrite(transcribeStatusCheckLambda);
+    stateMachine.grantStartExecution(uploadedVideoTriggerLambda);
 
-    uploadBucket.addEventNotification(
-      s3.EventType.OBJECT_CREATED,
-      new s3n.LambdaDestination(UploadedVideoTriggerLambda)
+    const transcribeServiceRole = new iam.Role(this, "TranscribeServiceRole", {
+      assumedBy: new iam.ServicePrincipal("transcribe.amazonaws.com"),
+    });
+
+    // Grant the Transcribe service role access to the bucket
+    uploadBucket.grantReadWrite(transcribeServiceRole);
+
+    // Then pass this role in your Lambda environment vars
+    transcribeStartLambda.addEnvironment(
+      "TRANSCRIBE_SERVICE_ROLE_ARN",
+      transcribeServiceRole.roleArn
     );
 
-    // 📤 7. Outputs
+    uploadBucket.grantRead(uploadedVideoTriggerLambda);
+
+    // Wire S3 Object Created -> Trigger Lambda
+    uploadBucket.addEventNotification(
+      s3.EventType.OBJECT_CREATED,
+      new s3n.LambdaDestination(uploadedVideoTriggerLambda)
+    );
+
+    //Outputs
     new cdk.CfnOutput(this, "VideoMetadataTableName", {
       value: videoMetadataTable.tableName,
       description: "The name of the DynamoDB Video Metadata table",

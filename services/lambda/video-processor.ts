@@ -29,18 +29,19 @@ export const handler: SQSHandler = async (event) => {
       // 1. Start a Transcribe job
       const transcribeJobName = `transcribe-${videoId}-${Date.now()}`;
 
-      await transcribe
-        .startTranscriptionJob({
-          TranscriptionJobName: transcribeJobName,
-          LanguageCode: "en-US", // Customize if you want multi-language
-          MediaFormat: "mp4", // Change if you support different formats
-          Media: {
-            MediaFileUri: `s3://${bucketName}/${objectKey}`,
-          },
-          OutputBucketName: UPLOAD_BUCKET,
-          OutputKey: `transcriptions/${videoId}.json`,
-        })
-        .promise();
+      transcribe.startTranscriptionJob({
+        TranscriptionJobName: transcribeJobName,
+        LanguageCode: "en-US",
+        MediaFormat: "mp4",
+        Media: {
+          MediaFileUri: `s3://${UPLOAD_BUCKET}/${objectKey}`,
+        },
+        OutputBucketName: UPLOAD_BUCKET,
+        Settings: {
+          ShowSpeakerLabels: false,
+          ChannelIdentification: false,
+        },
+      });
 
       console.log(`Started transcription job: ${transcribeJobName}`);
 
