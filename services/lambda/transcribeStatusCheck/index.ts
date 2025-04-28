@@ -1,24 +1,32 @@
-import { TranscribeService } from "aws-sdk";
+import {
+  TranscribeClient,
+  GetTranscriptionJobCommand,
+} from "@aws-sdk/client-transcribe";
 
-const transcribe = new TranscribeService();
+const transcribeClient = new TranscribeClient({
+  region: process.env.AWS_REGION,
+});
 
 export const handler = async (event: any) => {
-  console.log("Checking Transcribe job status for:", event);
+  console.log("Checking transcription status for:", event);
 
-  const transcribeJobName = event.transcribeJobName;
+  const { transcribeJobName } = event;
 
-  const { TranscriptionJob } = await transcribe
-    .getTranscriptionJob({
+  if (!transcribeJobName) {
+    throw new Error("Missing transcribeJobName in event");
+  }
+
+  const response = await transcribeClient.send(
+    new GetTranscriptionJobCommand({
       TranscriptionJobName: transcribeJobName,
     })
-    .promise();
+  );
 
-  const jobStatus = TranscriptionJob?.TranscriptionJobStatus ?? "UNKNOWN";
+  console.log("Transcription job status response:", response);
+
+  const status = response.TranscriptionJob?.TranscriptionJobStatus || "UNKNOWN";
 
   return {
-    status: jobStatus,
-    transcribeJobName,
-    videoId: event.videoId,
-    objectKey: event.objectKey,
+    status,
   };
 };

@@ -1,70 +1,19 @@
 import { SQSHandler } from "aws-lambda";
 import { DynamoDB, TranscribeService } from "aws-sdk";
 
-// Setup AWS clients
-const dynamoDb = new DynamoDB.DocumentClient();
-const transcribe = new TranscribeService();
+export const handler = async (event: any) => {
+  console.log("Received video for processing:", JSON.stringify(event, null, 2));
 
-// Environment variables (set from CDK)
-const METADATA_TABLE = process.env.METADATA_TABLE!;
-const UPLOAD_BUCKET = process.env.UPLOAD_BUCKET!;
+  const videoId = event.videoId;
+  const objectKey = event.objectKey;
+  const transcriptionText = event.transcriptionText; // Assume transcription already done
 
-export const handler: SQSHandler = async (event) => {
-  console.log("Received SQS event:", JSON.stringify(event, null, 2));
+  // Future: Analyze transcriptionText here (bleep bad words, generate captions, etc.)
 
-  for (const record of event.Records) {
-    try {
-      const s3Event = JSON.parse(record.body);
-      const s3Info = s3Event.Records[0].s3;
-      const bucketName = s3Info.bucket.name;
-      const objectKey = decodeURIComponent(
-        s3Info.object.key.replace(/\+/g, " ")
-      );
+  console.log(`Processing videoId=${videoId}, objectKey=${objectKey}`);
 
-      const videoId =
-        objectKey.split("/").pop()?.split(".")[0] ?? `video-${Date.now()}`;
-
-      console.log(`Processing video: ${objectKey}`);
-
-      // 1. Start a Transcribe job
-      const transcribeJobName = `transcribe-${videoId}-${Date.now()}`;
-
-      transcribe.startTranscriptionJob({
-        TranscriptionJobName: transcribeJobName,
-        LanguageCode: "en-US",
-        MediaFormat: "mp4",
-        Media: {
-          MediaFileUri: `s3://${UPLOAD_BUCKET}/${objectKey}`,
-        },
-        OutputBucketName: UPLOAD_BUCKET,
-        Settings: {
-          ShowSpeakerLabels: false,
-          ChannelIdentification: false,
-        },
-      });
-
-      console.log(`Started transcription job: ${transcribeJobName}`);
-
-      // 2. Insert metadata record into DynamoDB
-      await dynamoDb
-        .put({
-          TableName: METADATA_TABLE,
-          Item: {
-            videoId: videoId,
-            videoUploadedDate: new Date().toISOString(),
-            videoUploadedBy: "system", // Placeholder — later link to user if needed
-            videoDescription: "Uploaded video", // Placeholder
-            processingStatus: "processing",
-            originalBucket: bucketName,
-            originalObjectKey: objectKey,
-            transcriptionJobName: transcribeJobName,
-          },
-        })
-        .promise();
-
-      console.log(`Inserted metadata for videoId: ${videoId}`);
-    } catch (error) {
-      console.error("Failed to process record:", error);
-    }
-  }
+  return {
+    status: "Video processed successfully",
+    videoId,
+  };
 };

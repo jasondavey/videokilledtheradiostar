@@ -14,7 +14,7 @@ export class VideoPipelineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
 
-    //S3 Buckets
+    // S3 Buckets
     const uploadBucket = new s3.Bucket(this, "UploadBucket", {
       bucketName: `video-sanitizer-uploads`, // Ensure unique name
       removalPolicy: cdk.RemovalPolicy.DESTROY, // Use RETAIN for production
@@ -25,26 +25,21 @@ export class VideoPipelineStack extends cdk.Stack {
 
     uploadBucket.addToResourcePolicy(
       new iam.PolicyStatement({
-        actions: ["s3:ListBucket", "s3:GetBucketLocation"],
+        actions: ["s3:GetBucketLocation", "s3:ListBucket"],
         principals: [new iam.ServicePrincipal("transcribe.amazonaws.com")],
-        resources: [uploadBucket.bucketArn],
+        resources: [uploadBucket.bucketArn], // Bucket ONLY
       })
     );
 
     uploadBucket.addToResourcePolicy(
       new iam.PolicyStatement({
-        actions: [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:ListBucket",
-          "s3:GetBucketAcl",
-        ],
-        resources: [uploadBucket.bucketArn, `${uploadBucket.bucketArn}/*`],
+        actions: ["s3:GetObject", "s3:PutObject"],
         principals: [new iam.ServicePrincipal("transcribe.amazonaws.com")],
+        resources: [`${uploadBucket.bucketArn}/*`], // Bucket objects
       })
     );
 
-    //DynamoDB Table
+    // DynamoDB Table
     const videoMetadataTable = new dynamodb.Table(this, "VideoMetadataTable", {
       tableName: "VideoMetadata",
       partitionKey: { name: "videoId", type: dynamodb.AttributeType.STRING },
@@ -52,6 +47,7 @@ export class VideoPipelineStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
+    // Lambdas
     const transcribeStartLambda = new NodejsFunction(
       this,
       "startTranscribeLambda",
@@ -84,21 +80,7 @@ export class VideoPipelineStack extends cdk.Stack {
       }
     );
 
-    //Grant Permissions
-    transcribeStartLambda.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["transcribe:StartTranscriptionJob"],
-        resources: ["*"],
-      })
-    );
-
-    transcribeStatusCheckLambda.addToRolePolicy(
-      new iam.PolicyStatement({
-        actions: ["transcribe:GetTranscriptionJob"],
-        resources: ["*"],
-      })
-    );
-
+    // Step Functions and State Machine setup
     const startJob = new tasks.LambdaInvoke(this, "Start Transcribe Job", {
       lambdaFunction: transcribeStartLambda,
       outputPath: "$.Payload",
@@ -144,6 +126,7 @@ export class VideoPipelineStack extends cdk.Stack {
       }
     );
 
+    // UploadedVideoTrigger Lambda (after stateMachine creation)
     const uploadedVideoTriggerLambda = new NodejsFunction(
       this,
       "UploadedVideoTrigger",
@@ -154,39 +137,55 @@ export class VideoPipelineStack extends cdk.Stack {
           "../../../services/lambda/uploadedVideoTrigger/index.ts"
         ),
         handler: "handler",
-        environment: {
-          STATE_MACHINE_ARN: stateMachine.stateMachineArn,
-        },
       }
     );
 
-    // Allow Lambda to start the State Machine
-    uploadBucket.grantRead(transcribeStartLambda);
-    uploadBucket.grantReadWrite(transcribeStatusCheckLambda);
-    stateMachine.grantStartExecution(uploadedVideoTriggerLambda);
+    // Add environment variable for state machine ARN after stateMachine is created
+    uploadedVideoTriggerLambda.addEnvironment(
+      "STATE_MACHINE_ARN",
+      stateMachine.stateMachineArn
+    );
 
+    // IAM Roles
     const transcribeServiceRole = new iam.Role(this, "TranscribeServiceRole", {
       assumedBy: new iam.ServicePrincipal("transcribe.amazonaws.com"),
     });
 
-    // Grant the Transcribe service role access to the bucket
-    uploadBucket.grantReadWrite(transcribeServiceRole);
+    // Grant Permissions
+    transcribeStartLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["transcribe:StartTranscriptionJob"],
+        resources: ["*"],
+      })
+    );
 
-    // Then pass this role in your Lambda environment vars
+    transcribeStatusCheckLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["transcribe:GetTranscriptionJob"],
+        resources: ["*"],
+      })
+    );
+
+    // Pass the transcribe service role ARN to the start lambda
     transcribeStartLambda.addEnvironment(
       "TRANSCRIBE_SERVICE_ROLE_ARN",
       transcribeServiceRole.roleArn
     );
 
+    // Grant state machine start execution permission to the trigger lambda
+    stateMachine.grantStartExecution(uploadedVideoTriggerLambda);
+
+    // Grant bucket read permissions
+    uploadBucket.grantRead(transcribeStartLambda);
     uploadBucket.grantRead(uploadedVideoTriggerLambda);
 
-    // Wire S3 Object Created -> Trigger Lambda
+    // S3 Notifications
     uploadBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
       new s3n.LambdaDestination(uploadedVideoTriggerLambda)
     );
 
-    //Outputs
+    // Outputs
     new cdk.CfnOutput(this, "VideoMetadataTableName", {
       value: videoMetadataTable.tableName,
       description: "The name of the DynamoDB Video Metadata table",

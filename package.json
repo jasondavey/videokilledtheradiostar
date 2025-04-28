@@ -15,6 +15,8 @@
     "typescript": "^5.8.3"
   },
   "dependencies": {
-    "aws-sdk": "^2.1692.0"
+    "@aws-sdk/client-s3": "^3.797.0",
+    "@aws-sdk/client-sfn": "^3.797.0",
+    "@aws-sdk/client-transcribe": "^3.797.0"
   }
 }
