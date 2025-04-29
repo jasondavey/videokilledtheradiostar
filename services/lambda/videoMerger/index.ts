@@ -1,48 +1,54 @@
-import { S3Client, CopyObjectCommand } from "@aws-sdk/client-s3";
+import { S3Client, CopyObjectCommand } from '@aws-sdk/client-s3';
 
 const s3Client = new S3Client({ region: process.env.AWS_REGION });
+const BUCKET_NAME = process.env.UPLOAD_BUCKET!;
 
 export const handler = async (event: any) => {
-  console.log("Received event:", JSON.stringify(event, null, 2));
+  console.log('Received event:', JSON.stringify(event, null, 2));
 
-  const record = event.Records?.[0];
-  if (!record) {
-    throw new Error("No S3 record found in event");
+  const { videoKey, subtitleKey } = event;
+
+  if (!videoKey || !subtitleKey) {
+    throw new Error(
+      `Missing required keys. videoKey=${videoKey}, subtitleKey=${subtitleKey}`
+    );
   }
 
-  const bucketName = record.s3.bucket.name;
-  const vttKey = decodeURIComponent(record.s3.object.key.replace(/\+/g, " "));
+  const sanitizedPrefix = 'sanitized/';
 
-  if (!vttKey.endsWith(".vtt")) {
-    throw new Error("Uploaded file is not a .vtt subtitle file");
+  const videoBase = videoKey.split('/').pop()?.replace('.mp4', '');
+  const subtitleBase = subtitleKey.split('/').pop()?.replace('.vtt', '');
+
+  if (!videoBase || !subtitleBase) {
+    throw new Error('Could not parse video or subtitle filenames.');
   }
 
-  const baseName = vttKey.replace(".vtt", "");
-  const videoKey = `${baseName}.mp4`;
+  const sanitizedVideoKey = `${sanitizedPrefix}${videoBase}.mp4`;
+  const sanitizedSubtitleKey = `${sanitizedPrefix}${subtitleBase}.vtt`;
 
-  const sanitizedPrefix = "sanitized/";
-
-  console.log(
-    `Preparing sanitized copies: video=${videoKey}, subtitles=${vttKey}`
-  );
-
-  // Copy video
+  console.log(`Copying video: ${videoKey} → ${sanitizedVideoKey}`);
   await s3Client.send(
     new CopyObjectCommand({
-      Bucket: bucketName,
-      CopySource: `${bucketName}/${videoKey}`,
-      Key: `${sanitizedPrefix}${baseName}.mp4`,
+      Bucket: BUCKET_NAME,
+      CopySource: `${BUCKET_NAME}/${videoKey}`,
+      Key: sanitizedVideoKey
     })
   );
 
-  // Copy subtitle
+  console.log(`Copying subtitle: ${subtitleKey} → ${sanitizedSubtitleKey}`);
   await s3Client.send(
     new CopyObjectCommand({
-      Bucket: bucketName,
-      CopySource: `${bucketName}/${vttKey}`,
-      Key: `${sanitizedPrefix}${baseName}.vtt`,
+      Bucket: BUCKET_NAME,
+      CopySource: `${BUCKET_NAME}/${subtitleKey}`,
+      Key: sanitizedSubtitleKey
     })
   );
 
-  console.log("Sanitized video and subtitles copied successfully!");
+  console.log('✅ Sanitized video and subtitles copied successfully!');
+
+  return {
+    status: 'SUCCESS',
+    sanitizedVideoKey,
+    sanitizedSubtitleKey
+  };
 };

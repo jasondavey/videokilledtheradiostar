@@ -167,6 +167,105 @@ export class VideoPipelineStack extends cdk.Stack {
 
     uploadedVideoTriggerLogGroup.grantWrite(uploadedVideoTriggerLambda);
 
+    const videoMergerLambda = new NodejsFunction(this, 'VideoMergerLambda', {
+      functionName: 'video-merger',
+      description: 'Lambda to merge sanitized video with subtitles',
+      runtime: lambda.Runtime.NODEJS_18_X,
+      entry: path.resolve(
+        __dirname,
+        '../../../services/lambda/videoMerger/index.ts'
+      ),
+      handler: 'handler',
+      environment: {
+        UPLOAD_BUCKET: uploadBucket.bucketName
+      }
+    });
+
+    uploadBucket.grantReadWrite(videoMergerLambda);
+
+    const videoMergerLogGroup = new logs.LogGroup(this, 'VideoMergerLogGroup', {
+      logGroupName: '/aws/lambda/video-merger',
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      retention: logs.RetentionDays.ONE_DAY
+    });
+    videoMergerLogGroup.grantWrite(videoMergerLambda);
+
+    const subtitleConverterLambda = new NodejsFunction(
+      this,
+      'SubtitleConverterLambda',
+      {
+        functionName: 'subtitle-converter',
+        description: 'Lambda to convert transcripts to subtitles',
+        runtime: lambda.Runtime.NODEJS_18_X,
+        entry: path.resolve(
+          __dirname,
+          '../../../services/lambda/subtitleConverter/index.ts'
+        ),
+        handler: 'handler',
+        environment: {
+          UPLOAD_BUCKET: uploadBucket.bucketName
+        }
+      }
+    );
+
+    uploadBucket.grantReadWrite(subtitleConverterLambda);
+
+    const subtitleConverterLogGroup = new logs.LogGroup(
+      this,
+      'SubtitleConverterLogGroup',
+      {
+        logGroupName: '/aws/lambda/subtitle-converter',
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        retention: logs.RetentionDays.ONE_DAY
+      }
+    );
+
+    subtitleConverterLogGroup.grantWrite(subtitleConverterLambda);
+
+    const ffmpegLayer = lambda.LayerVersion.fromLayerVersionArn(
+      this,
+      'FFmpegLayer',
+      'arn:aws:lambda:us-east-1:303747928533:layer:ffmpeg:2'
+    );
+
+    const attachSubtitlesLambda = new NodejsFunction(
+      this,
+      'AttachSubtitlesLambda',
+      {
+        functionName: 'attach-subtitles',
+        description: 'Adds subtitles to video using ffmpeg',
+        runtime: lambda.Runtime.NODEJS_18_X,
+        entry: path.resolve(
+          __dirname,
+          '../../../services/lambda/attachSubtitles/index.ts'
+        ),
+        handler: 'handler',
+        environment: {
+          UPLOAD_BUCKET: uploadBucket.bucketName
+        },
+        layers: [ffmpegLayer],
+        timeout: cdk.Duration.minutes(5),
+        memorySize: 2048
+      }
+    );
+
+    // Grant read/write access to the bucket
+    uploadBucket.grantReadWrite(attachSubtitlesLambda);
+
+    // === Log Group for AttachSubtitlesLambda ===
+    const attachSubtitlesLogGroup = new logs.LogGroup(
+      this,
+      'AttachSubtitlesLogGroup',
+      {
+        logGroupName: '/aws/lambda/attach-subtitles',
+        retention: logs.RetentionDays.ONE_DAY,
+        removalPolicy: cdk.RemovalPolicy.DESTROY
+      }
+    );
+
+    // Allow Lambda to write to its log group
+    attachSubtitlesLogGroup.grantWrite(attachSubtitlesLambda);
+
     // === Grant Permissions to Lambdas ===
     transcribeStartLambda.addToRolePolicy(
       new iam.PolicyStatement({
@@ -203,6 +302,62 @@ export class VideoPipelineStack extends cdk.Stack {
 
     const jobSucceeded = new sfn.Choice(this, 'Job Complete?');
 
+    const convertSubtitlesTask = new tasks.LambdaInvoke(
+      this,
+      'Convert Subtitles',
+      {
+        lambdaFunction: subtitleConverterLambda,
+        payload: sfn.TaskInput.fromObject({
+          transcriptKey: sfn.JsonPath.stringAt('$.transcriptKey'),
+          videoKey: sfn.JsonPath.stringAt('$.videoKey')
+        }),
+        outputPath: '$.Payload'
+      }
+    );
+
+    const attachSubtitlesTask = new tasks.LambdaInvoke(
+      this,
+      'Attach Subtitles',
+      {
+        lambdaFunction: attachSubtitlesLambda,
+        payload: sfn.TaskInput.fromObject({
+          videoKey: sfn.JsonPath.stringAt('$.videoKey'),
+          subtitleKey: sfn.JsonPath.stringAt('$.subtitleKey')
+        }),
+        outputPath: '$.Payload'
+      }
+    );
+
+    const mergeVideo = new tasks.LambdaInvoke(
+      this,
+      'Merge Video and Subtitles',
+      {
+        lambdaFunction: videoMergerLambda,
+        payload: sfn.TaskInput.fromObject({
+          videoKey: sfn.JsonPath.stringAt('$.videoKey'),
+          subtitleKey: sfn.JsonPath.stringAt('$.subtitleKey')
+        }),
+        outputPath: '$.Payload'
+      }
+    );
+
+    const subtitleSuccess = new sfn.Succeed(
+      this,
+      'Subtitles Attached Successfully'
+    );
+
+    const subtitleConversionFailed = new sfn.Fail(
+      this,
+      'Subtitle Conversion Failed'
+    );
+
+    const conversionSucceeded = new sfn.Choice(this, 'Conversion Succeeded?')
+      .when(
+        sfn.Condition.stringEquals('$.status', 'SUCCESS'),
+        attachSubtitlesTask.next(mergeVideo).next(subtitleSuccess)
+      )
+      .otherwise(subtitleConversionFailed);
+
     const definition = startJob
       .next(waitX)
       .next(checkJob)
@@ -215,7 +370,7 @@ export class VideoPipelineStack extends cdk.Stack {
           )
           .when(
             sfn.Condition.stringEquals('$.status', 'COMPLETED'),
-            new sfn.Succeed(this, 'Transcription Completed Successfully')
+            convertSubtitlesTask.next(conversionSucceeded)
           )
       );
 
