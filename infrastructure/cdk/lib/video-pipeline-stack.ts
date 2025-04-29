@@ -9,6 +9,7 @@ import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as path from 'path';
+import * as logs from 'aws-cdk-lib/aws-logs';
 
 export class VideoPipelineStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
@@ -82,6 +83,8 @@ export class VideoPipelineStack extends cdk.Stack {
       this,
       'StartTranscribeLambda',
       {
+        functionName: 'start-transcribe',
+        description: 'Lambda function to start transcription jobs',
         runtime: lambda.Runtime.NODEJS_18_X,
         entry: path.resolve(
           __dirname,
@@ -94,10 +97,25 @@ export class VideoPipelineStack extends cdk.Stack {
       }
     );
 
+    const startTranscribeLogGroup = new logs.LogGroup(
+      this,
+      'StartTranscribeLogGroup',
+      {
+        logGroupName: '/aws/lambda/start-transcribe',
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        retention: logs.RetentionDays.ONE_DAY
+      }
+    );
+
+    startTranscribeLogGroup.grantWrite(transcribeStartLambda);
+
     const transcribeStatusCheckLambda = new NodejsFunction(
       this,
       'TranscribeStatusCheckLambda',
       {
+        functionName: 'transcribe-status-check',
+        description:
+          'Lambda function to check the status of transcription jobs',
         runtime: lambda.Runtime.NODEJS_18_X,
         entry: path.resolve(
           __dirname,
@@ -110,10 +128,24 @@ export class VideoPipelineStack extends cdk.Stack {
       }
     );
 
+    const transcribeStatusCheckLogGroup = new logs.LogGroup(
+      this,
+      'TranscribeStatusCheckLogGroup',
+      {
+        logGroupName: '/aws/lambda/transcribe-status-check',
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        retention: logs.RetentionDays.ONE_DAY
+      }
+    );
+
+    transcribeStatusCheckLogGroup.grantWrite(transcribeStatusCheckLambda);
+
     const uploadedVideoTriggerLambda = new NodejsFunction(
       this,
       'UploadedVideoTriggerLambda',
       {
+        functionName: 'uploaded-video-trigger',
+        description: 'Lambda function invoked on video uploads',
         runtime: lambda.Runtime.NODEJS_18_X,
         entry: path.resolve(
           __dirname,
@@ -122,6 +154,18 @@ export class VideoPipelineStack extends cdk.Stack {
         handler: 'handler'
       }
     );
+
+    const uploadedVideoTriggerLogGroup = new logs.LogGroup(
+      this,
+      'UploadedVideoTriggerLogGroup',
+      {
+        logGroupName: '/aws/lambda/uploaded-video-trigger',
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        retention: logs.RetentionDays.ONE_DAY
+      }
+    );
+
+    uploadedVideoTriggerLogGroup.grantWrite(uploadedVideoTriggerLambda);
 
     // === Grant Permissions to Lambdas ===
     transcribeStartLambda.addToRolePolicy(
@@ -138,25 +182,8 @@ export class VideoPipelineStack extends cdk.Stack {
       })
     );
 
-    const moveTranscriptLambda = new NodejsFunction(
-      this,
-      'MoveTranscriptLambda',
-      {
-        runtime: lambda.Runtime.NODEJS_18_X,
-        entry: path.resolve(
-          __dirname,
-          '../../../services/lambda/moveTranscript/index.ts'
-        ),
-        handler: 'handler',
-        environment: {
-          UPLOAD_BUCKET: uploadBucket.bucketName
-        }
-      }
-    );
-
     uploadBucket.grantRead(transcribeStartLambda);
     uploadBucket.grantRead(uploadedVideoTriggerLambda);
-    uploadBucket.grantReadWrite(moveTranscriptLambda);
 
     // === Step Function Workflow ===
     const startJob = new tasks.LambdaInvoke(this, 'Start Transcribe Job', {
@@ -164,7 +191,7 @@ export class VideoPipelineStack extends cdk.Stack {
       outputPath: '$.Payload'
     });
 
-    const waitTime = 10;
+    const waitTime = 30;
     const waitX = new sfn.Wait(this, `Wait ${waitTime} seconds`, {
       time: sfn.WaitTime.duration(cdk.Duration.seconds(waitTime))
     });
@@ -173,18 +200,6 @@ export class VideoPipelineStack extends cdk.Stack {
       lambdaFunction: transcribeStatusCheckLambda,
       outputPath: '$.Payload'
     });
-
-    const moveTranscriptFile = new tasks.LambdaInvoke(
-      this,
-      'Move Transcript File',
-      {
-        lambdaFunction: moveTranscriptLambda,
-        payload: sfn.TaskInput.fromObject({
-          transcriptKey: sfn.JsonPath.stringAt('$.transcriptKey')
-        }),
-        outputPath: '$.Payload'
-      }
-    );
 
     const jobSucceeded = new sfn.Choice(this, 'Job Complete?');
 
@@ -200,11 +215,19 @@ export class VideoPipelineStack extends cdk.Stack {
           )
           .when(
             sfn.Condition.stringEquals('$.status', 'COMPLETED'),
-            moveTranscriptFile.next(
-              new sfn.Succeed(this, 'Transcript Moved Successfully')
-            )
+            new sfn.Succeed(this, 'Transcription Completed Successfully')
           )
       );
+
+    const stateMachineLogGroup = new logs.LogGroup(
+      this,
+      'VideoProcessingStateMachineLogGroup',
+      {
+        logGroupName: '/aws/videopipeline/statemachine',
+        retention: logs.RetentionDays.ONE_DAY,
+        removalPolicy: cdk.RemovalPolicy.DESTROY
+      }
+    );
 
     const stateMachine = new sfn.StateMachine(
       this,
@@ -212,7 +235,12 @@ export class VideoPipelineStack extends cdk.Stack {
       {
         definitionBody: sfn.DefinitionBody.fromChainable(definition),
         timeout: cdk.Duration.minutes(30),
-        stateMachineName: 'VideoProcessingStateMachine'
+        stateMachineName: 'VideoProcessingStateMachine',
+        logs: {
+          destination: stateMachineLogGroup,
+          level: sfn.LogLevel.ALL,
+          includeExecutionData: true
+        }
       }
     );
 
@@ -226,7 +254,8 @@ export class VideoPipelineStack extends cdk.Stack {
     // === S3 Trigger for Uploads ===
     uploadBucket.addEventNotification(
       s3.EventType.OBJECT_CREATED,
-      new s3n.LambdaDestination(uploadedVideoTriggerLambda)
+      new s3n.LambdaDestination(uploadedVideoTriggerLambda),
+      { prefix: 'uploads/', suffix: '.mp4' } // <- Only .mp4 videos in /uploads/
     );
 
     // === Outputs ===

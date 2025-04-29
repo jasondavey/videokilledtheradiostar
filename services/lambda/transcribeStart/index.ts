@@ -60,6 +60,6 @@ export const handler = async (event: any) => {
     transcribeJobName,
     videoId,
     objectKey,
-    transcriptKey: `${transcribeJobName}.json`
+    transcriptKey: `transcripts/${transcribeJobName}.json`
   };
 };
