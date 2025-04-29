@@ -1,42 +1,44 @@
-import {
-  S3Client,
-  CopyObjectCommand,
-  DeleteObjectCommand,
-} from "@aws-sdk/client-s3";
+import { S3Client, CopyObjectCommand } from '@aws-sdk/client-s3';
 
-const s3Client = new S3Client({ region: process.env.AWS_REGION });
-const BUCKET = process.env.UPLOAD_BUCKET!;
+const s3 = new S3Client({ region: process.env.AWS_REGION });
+
+const UPLOAD_BUCKET = process.env.UPLOAD_BUCKET!;
 
 export const handler = async (event: any) => {
-  console.log("Moving transcript for:", event);
+  console.log('MoveTranscript Lambda triggered with:', event);
 
-  const { objectKey } = event;
-  if (!objectKey) {
-    throw new Error("Missing objectKey in event!");
+  const { transcriptKey } = event;
+
+  if (!transcriptKey) {
+    throw new Error('Missing transcriptKey in event input');
   }
 
-  const targetKey = `transcripts/${objectKey}`;
+  const destinationKey = transcriptKey.replace(/^transcripts\//, 'sanitized/');
 
-  // Copy the object
-  await s3Client.send(
+  console.log(`Copying from ${transcriptKey} to ${destinationKey}`);
+
+  // Copy the transcript JSON to sanitized/ folder
+  await s3.send(
     new CopyObjectCommand({
-      Bucket: BUCKET,
-      CopySource: `${BUCKET}/${objectKey}`,
-      Key: targetKey,
+      Bucket: UPLOAD_BUCKET,
+      CopySource: `${UPLOAD_BUCKET}/${transcriptKey}`, // full path needed
+      Key: destinationKey
     })
   );
 
-  // Delete the original
-  await s3Client.send(
-    new DeleteObjectCommand({
-      Bucket: BUCKET,
-      Key: objectKey,
-    })
-  );
+  console.log(`Copied transcript successfully.`);
 
-  console.log(`Moved ${objectKey} ➔ ${targetKey}`);
+  // Optional: delete the original transcript
+  // await s3.send(
+  //   new DeleteObjectCommand({
+  //     Bucket: UPLOAD_BUCKET,
+  //     Key: transcriptKey
+  //   })
+  // );
+
+  //console.log(`Deleted original transcript.`);
 
   return {
-    transcriptKey: targetKey,
+    destinationKey
   };
 };
