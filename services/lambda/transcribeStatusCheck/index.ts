@@ -1,18 +1,20 @@
-// services/lambda/transcribeStatusCheck/index.ts
-
 import {
   TranscribeClient,
   GetTranscriptionJobCommand
 } from '@aws-sdk/client-transcribe';
+import { logAndReturn } from '../../utils/logReturn';
 
 const transcribeClient = new TranscribeClient({
   region: process.env.AWS_REGION
 });
 
 export const handler = async (event: any) => {
-  console.log('[Check Status] Received event:', JSON.stringify(event));
+  console.log(
+    '[Transcribe Check Status] Received event:',
+    JSON.stringify(event)
+  );
 
-  const { transcribeJobName, objectKey } = event;
+  const { transcribeJobName } = event;
 
   if (!transcribeJobName) {
     console.error('[Check Status] Error: Missing transcribeJobName in event');
@@ -42,22 +44,21 @@ export const handler = async (event: any) => {
 
       const normalizedKey = transcriptKey.replace(/^video-sanitizer\//, '');
 
-      console.log(
-        '[Check Status] Job COMPLETED. Transcript Key:',
-        transcriptKey
-      );
-
       console.log(`[Check Status] Transcript key: ${normalizedKey}`);
-      return {
-        status,
-        transcriptKey: normalizedKey,
-        videoKey: objectKey
-      };
+
+      return logAndReturn({
+        status: 'COMPLETED',
+        transcriptKey: `transcripts/${transcribeJobName}.json`,
+        videoKey: event.videoKey
+      });
     }
 
     console.log(`[Check Status] Job Status: ${status}`);
 
-    return { status, objectKey };
+    return logAndReturn({
+      status,
+      videoKey: event.videoKey
+    });
   } catch (error) {
     console.error('[Check Status] Error calling AWS Transcribe:', error);
     throw error;

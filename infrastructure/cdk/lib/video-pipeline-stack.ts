@@ -266,6 +266,74 @@ export class VideoPipelineStack extends cdk.Stack {
     // Allow Lambda to write to its log group
     attachSubtitlesLogGroup.grantWrite(attachSubtitlesLambda);
 
+    const profanityScannerLambda = new NodejsFunction(
+      this,
+      'ProfanityScannerLambda',
+      {
+        functionName: 'profanity-scanner',
+        description:
+          'Scans transcript for profanities and returns timestamp ranges',
+        runtime: lambda.Runtime.NODEJS_18_X,
+        entry: path.resolve(
+          __dirname,
+          '../../../services/lambda/profanityScanner/index.ts'
+        ),
+        handler: 'handler',
+        environment: {
+          UPLOAD_BUCKET: uploadBucket.bucketName
+        },
+        timeout: cdk.Duration.seconds(30),
+        memorySize: 512
+      }
+    );
+
+    // Grant read access to the bucket
+    uploadBucket.grantRead(profanityScannerLambda);
+
+    profanityScannerLambda.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:GetObject'],
+        resources: [`${uploadBucket.bucketArn}/transcripts/*`]
+      })
+    );
+
+    // === Log Group for AttachSubtitlesLambda ===
+    const profanityScannerLogGroup = new logs.LogGroup(
+      this,
+      'ProfanityScannerLogGroup',
+      {
+        logGroupName: '/aws/lambda/profanity-scanner',
+        retention: logs.RetentionDays.ONE_DAY,
+        removalPolicy: cdk.RemovalPolicy.DESTROY
+      }
+    );
+
+    profanityScannerLogGroup.grantWrite(profanityScannerLambda);
+
+    const audioCensorLambda = new NodejsFunction(this, 'AudioCensorLambda', {
+      functionName: 'audio-censor',
+      description: 'Silences profane segments in video audio',
+      runtime: lambda.Runtime.NODEJS_18_X,
+      entry: path.resolve(
+        __dirname,
+        '../../../services/lambda/audioCensor/index.ts'
+      ),
+      handler: 'handler',
+      environment: {
+        UPLOAD_BUCKET: uploadBucket.bucketName
+      },
+      layers: [ffmpegLayer], // ✅ Assumes FFmpeg layer
+      timeout: cdk.Duration.minutes(1)
+    });
+
+    uploadBucket.grantReadWrite(audioCensorLambda);
+
+    new logs.LogGroup(this, 'AudioCensorLogGroup', {
+      logGroupName: '/aws/lambda/audio-censor',
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      retention: logs.RetentionDays.ONE_DAY
+    }).grantWrite(audioCensorLambda);
+
     // === Grant Permissions to Lambdas ===
     transcribeStartLambda.addToRolePolicy(
       new iam.PolicyStatement({
@@ -297,20 +365,34 @@ export class VideoPipelineStack extends cdk.Stack {
 
     const checkJob = new tasks.LambdaInvoke(this, 'Check Transcribe Status', {
       lambdaFunction: transcribeStatusCheckLambda,
+      payload: sfn.TaskInput.fromJsonPathAt('$'),
       outputPath: '$.Payload'
     });
 
     const jobSucceeded = new sfn.Choice(this, 'Job Complete?');
+
+    const profanityScannerTask = new tasks.LambdaInvoke(
+      this,
+      'Scan for Profanity',
+      {
+        lambdaFunction: profanityScannerLambda,
+        payload: sfn.TaskInput.fromJsonPathAt('$'),
+        outputPath: '$.Payload'
+      }
+    );
+
+    const audioCensorshipTask = new tasks.LambdaInvoke(this, 'Censor Audio', {
+      lambdaFunction: audioCensorLambda,
+      payload: sfn.TaskInput.fromJsonPathAt('$'),
+      outputPath: '$.Payload'
+    });
 
     const convertSubtitlesTask = new tasks.LambdaInvoke(
       this,
       'Convert Subtitles',
       {
         lambdaFunction: subtitleConverterLambda,
-        payload: sfn.TaskInput.fromObject({
-          transcriptKey: sfn.JsonPath.stringAt('$.transcriptKey'),
-          videoKey: sfn.JsonPath.stringAt('$.videoKey')
-        }),
+        payload: sfn.TaskInput.fromJsonPathAt('$'),
         outputPath: '$.Payload'
       }
     );
@@ -320,10 +402,7 @@ export class VideoPipelineStack extends cdk.Stack {
       'Attach Subtitles',
       {
         lambdaFunction: attachSubtitlesLambda,
-        payload: sfn.TaskInput.fromObject({
-          videoKey: sfn.JsonPath.stringAt('$.videoKey'),
-          subtitleKey: sfn.JsonPath.stringAt('$.subtitleKey')
-        }),
+        payload: sfn.TaskInput.fromJsonPathAt('$'),
         outputPath: '$.Payload'
       }
     );
@@ -333,30 +412,19 @@ export class VideoPipelineStack extends cdk.Stack {
       'Merge Video and Subtitles',
       {
         lambdaFunction: videoMergerLambda,
-        payload: sfn.TaskInput.fromObject({
-          videoKey: sfn.JsonPath.stringAt('$.videoKey'),
-          subtitleKey: sfn.JsonPath.stringAt('$.subtitleKey')
-        }),
+        payload: sfn.TaskInput.fromJsonPathAt('$'),
         outputPath: '$.Payload'
       }
-    );
-
-    const subtitleSuccess = new sfn.Succeed(
-      this,
-      'Subtitles Attached Successfully'
-    );
-
-    const subtitleConversionFailed = new sfn.Fail(
-      this,
-      'Subtitle Conversion Failed'
     );
 
     const conversionSucceeded = new sfn.Choice(this, 'Conversion Succeeded?')
       .when(
         sfn.Condition.stringEquals('$.status', 'SUCCESS'),
-        attachSubtitlesTask.next(mergeVideo).next(subtitleSuccess)
+        attachSubtitlesTask
+          .next(mergeVideo)
+          .next(new sfn.Succeed(this, 'Subtitles Attached Successfully'))
       )
-      .otherwise(subtitleConversionFailed);
+      .otherwise(new sfn.Fail(this, 'Subtitle Conversion Failed'));
 
     const definition = startJob
       .next(waitX)
@@ -370,7 +438,10 @@ export class VideoPipelineStack extends cdk.Stack {
           )
           .when(
             sfn.Condition.stringEquals('$.status', 'COMPLETED'),
-            convertSubtitlesTask.next(conversionSucceeded)
+            profanityScannerTask
+              .next(audioCensorshipTask)
+              .next(convertSubtitlesTask)
+              .next(conversionSucceeded)
           )
       );
 

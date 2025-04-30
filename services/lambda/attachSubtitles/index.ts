@@ -53,7 +53,7 @@ const runFfmpeg = (
 };
 
 export const handler = async (event: any) => {
-  console.log('Received event:', JSON.stringify(event));
+  console.log('[Attach Subtitles] Received event:', JSON.stringify(event));
 
   const { videoKey, subtitleKey } = event;
 

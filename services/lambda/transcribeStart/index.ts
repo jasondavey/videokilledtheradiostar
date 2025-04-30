@@ -2,6 +2,7 @@ import {
   TranscribeClient,
   StartTranscriptionJobCommand
 } from '@aws-sdk/client-transcribe';
+import { logAndReturn } from '../../utils/logReturn';
 
 const UPLOAD_BUCKET = process.env.UPLOAD_BUCKET!;
 const AWS_REGION = process.env.AWS_REGION!;
@@ -11,7 +12,7 @@ const transcribeClient = new TranscribeClient({
 });
 
 export const handler = async (event: any) => {
-  console.log('Starting transcription for:', event);
+  console.log('[Transcribe Start] Received event:', JSON.stringify(event));
 
   let objectKey: string | undefined;
 
@@ -56,10 +57,9 @@ export const handler = async (event: any) => {
 
   console.log('Successfully started transcription job:', transcribeJobName);
 
-  return {
+  return logAndReturn({
     transcribeJobName,
     videoId,
-    objectKey,
-    transcriptKey: `transcripts/${transcribeJobName}.json`
-  };
+    videoKey: objectKey
+  });
 };

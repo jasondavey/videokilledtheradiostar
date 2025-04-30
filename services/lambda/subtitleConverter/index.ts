@@ -4,6 +4,8 @@ import {
   PutObjectCommand
 } from '@aws-sdk/client-s3';
 import { Readable } from 'stream';
+import { filterProfanity } from '../../utils/profanityFilter';
+import { logAndReturn } from '../../utils/logReturn';
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 const BUCKET_NAME = process.env.UPLOAD_BUCKET!;
@@ -17,17 +19,16 @@ const streamToString = async (stream: Readable): Promise<string> => {
   });
 };
 
-function convertToWebVTT(transcriptJson: any): string {
-  const results = transcriptJson.results.items;
+function convertToWebVTT(items: any[]): string {
   let vtt = 'WEBVTT\n\n';
   let index = 1;
 
-  for (const item of results) {
+  for (const item of items) {
     if (item.type !== 'pronunciation') continue;
 
     const start = parseFloat(item.start_time).toFixed(3);
     const end = parseFloat(item.end_time).toFixed(3);
-    const text = item.alternatives[0].content;
+    const text = filterProfanity(item.alternatives[0].content);
 
     vtt += `${index++}\n`;
     vtt += `${formatTimestamp(start)} --> ${formatTimestamp(end)}\n`;
@@ -48,11 +49,20 @@ function formatTimestamp(seconds: string): string {
 }
 
 export const handler = async (event: any) => {
-  const transcriptKey = event.transcriptKey;
+  console.log('[Subtitle Converter] Received event:', JSON.stringify(event));
 
-  console.log(`Converting transcript: ${transcriptKey}`);
+  const transcriptKey = event.transcriptKey;
+  const videoKey = event.videoKey;
+
+  if (!transcriptKey || !videoKey) {
+    throw new Error(
+      `Missing required fields: transcriptKey=${transcriptKey}, videoKey=${videoKey}`
+    );
+  }
 
   try {
+    console.log(`Converting transcript: ${transcriptKey}`);
+
     const getCommand = new GetObjectCommand({
       Bucket: BUCKET_NAME,
       Key: transcriptKey
@@ -62,7 +72,15 @@ export const handler = async (event: any) => {
     const body = await streamToString(response.Body as Readable);
     const transcriptJson = JSON.parse(body);
 
-    const vtt = convertToWebVTT(transcriptJson);
+    const items = Array.isArray(transcriptJson?.results?.items)
+      ? transcriptJson.results.items
+      : [];
+
+    if (!items.length) {
+      throw new Error('Transcript file contains no items to convert.');
+    }
+
+    const vtt = convertToWebVTT(items);
 
     const vttKey = transcriptKey
       .replace(/^transcripts\//, 'subtitles/')
@@ -79,17 +97,17 @@ export const handler = async (event: any) => {
 
     console.log(`✅ Uploaded subtitles to ${vttKey}`);
 
-    return {
+    return logAndReturn({
       status: 'SUCCESS',
       subtitleKey: vttKey,
-      videoKey: event.videoKey
-    };
+      videoKey
+    });
   } catch (error) {
     console.error('❌ Failed to convert transcript to subtitles', error);
-    return {
+    return logAndReturn({
       status: 'FAILED',
       error: (error as Error).message,
-      videoKey: event.videoKey
-    };
+      videoKey
+    });
   }
 };

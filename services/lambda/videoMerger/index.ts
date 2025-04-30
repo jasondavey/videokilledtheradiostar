@@ -1,10 +1,12 @@
 import { S3Client, CopyObjectCommand } from '@aws-sdk/client-s3';
+import { logAndReturn } from '../../utils/logReturn';
+import { log } from 'console';
 
 const s3Client = new S3Client({ region: process.env.AWS_REGION });
 const BUCKET_NAME = process.env.UPLOAD_BUCKET!;
 
 export const handler = async (event: any) => {
-  console.log('Received event:', JSON.stringify(event, null, 2));
+  console.log('[Video Merger] Received event:', JSON.stringify(event));
 
   const { videoKey, subtitleKey } = event;
 
@@ -46,9 +48,9 @@ export const handler = async (event: any) => {
 
   console.log('✅ Sanitized video and subtitles copied successfully!');
 
-  return {
+  return logAndReturn({
     status: 'SUCCESS',
     sanitizedVideoKey,
     sanitizedSubtitleKey
-  };
+  });
 };
