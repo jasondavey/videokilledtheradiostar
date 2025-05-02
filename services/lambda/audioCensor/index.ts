@@ -3,16 +3,15 @@ import {
   GetObjectCommand,
   PutObjectCommand
 } from '@aws-sdk/client-s3';
+import { Readable } from 'stream';
 import { spawn } from 'child_process';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { readFileSync, createWriteStream } from 'fs';
-import { Readable } from 'stream';
-import { logAndReturn } from '../../utils/logReturn';
+import { createWriteStream, readFileSync } from 'fs';
 
 const s3 = new S3Client({ region: process.env.AWS_REGION });
 const BUCKET = process.env.UPLOAD_BUCKET!;
-const FFMPEG = '/opt/ffmpeg/ffmpeg';
+const ffmpegPath = '/opt/ffmpeg/ffmpeg';
 
 const streamToFile = async (stream: Readable, path: string): Promise<void> => {
   return new Promise((resolve, reject) => {
@@ -23,87 +22,94 @@ const streamToFile = async (stream: Readable, path: string): Promise<void> => {
   });
 };
 
-export const handler = async (event: any) => {
-  console.log('[Audio Censor] Received event:', JSON.stringify(event));
+const runFfmpeg = (ffmpegArgs: string[], workingDir: string): Promise<void> => {
+  return new Promise((resolve, reject) => {
+    console.log(`[FFmpeg] Running: ${ffmpegPath} ${ffmpegArgs.join(' ')}`);
+    const ffmpeg = spawn(ffmpegPath, ffmpegArgs, { cwd: workingDir });
 
-  const { videoKey, profanityTimestamps, transcriptKey } = event;
-
-  validateRequiredFields({
-    videoKey,
-    transcriptKey,
-    profanityTimestamps
+    ffmpeg.stderr.on('data', (data) =>
+      console.error(`[FFmpeg] ${data.toString()}`)
+    );
+    ffmpeg.on('close', (code) => {
+      if (code === 0) resolve();
+      else reject(new Error(`ffmpeg exited with code ${code}`));
+    });
   });
+};
 
-  const inputPath = join(tmpdir(), 'input.mp4');
-  const outputPath = join(tmpdir(), 'censored.mp4');
-  const censoredKey = videoKey
-    .replace(/^uploads\//, 'censored/')
-    .replace(/\.mp4$/, '-censored.mp4');
+export const handler = async (event: any) => {
+  console.log('[Audio Censor] Received event:', JSON.stringify(event, null, 2));
+
+  const { videoKey, transcriptKey, profanityTimestamps } = event;
+  if (!videoKey || !transcriptKey || !profanityTimestamps?.length) {
+    throw new Error(
+      'Missing required fields: ' +
+        [
+          !videoKey ? 'videoKey' : '',
+          !transcriptKey ? 'transcriptKey' : '',
+          !profanityTimestamps?.length ? 'profanityTimestamps' : ''
+        ]
+          .filter(Boolean)
+          .join(', ')
+    );
+  }
+
+  const workDir = tmpdir();
+  const videoPath = join(workDir, 'input.mp4');
+  const outputPath = join(workDir, 'censored.mp4');
+
+  const videoObj = await s3.send(
+    new GetObjectCommand({ Bucket: BUCKET, Key: videoKey })
+  );
+  await streamToFile(videoObj.Body as Readable, videoPath);
+
+  const filterComplex = generateBeepOverlayFilter(profanityTimestamps);
+
+  const ffmpegArgs = [
+    '-i',
+    videoPath,
+    '-filter_complex',
+    filterComplex,
+    '-map',
+    '0:v',
+    '-map',
+    '[mixed]',
+    '-c:v',
+    'copy',
+    '-c:a',
+    'aac',
+    '-shortest',
+    outputPath
+  ];
 
   try {
-    console.log(`Downloading video from: ${videoKey}`);
-    const object = await s3.send(
-      new GetObjectCommand({ Bucket: BUCKET, Key: videoKey })
-    );
-    await streamToFile(object.Body as Readable, inputPath);
+    await runFfmpeg(ffmpegArgs, workDir);
 
-    const volumeFilters = profanityTimestamps
-      .map(
-        ({ start, end }: any, i: number) =>
-          `[0:a]volume=enable='between(t,${start},${end})':volume=0[a${i}]`
-      )
-      .join(';');
+    const outputKey = videoKey
+      .replace(/^uploads\//, 'censored/')
+      .replace(/\.mp4$/, '-censored.mp4');
 
-    const amixInputs = profanityTimestamps
-      .map((_: any, i: number) => `[a${i}]`)
-      .join('');
-
-    const filterComplex = `${volumeFilters};${amixInputs}amix=inputs=${profanityTimestamps.length}[aout]`;
-
-    const ffmpeg = spawn(FFMPEG, [
-      '-i',
-      inputPath,
-      '-filter_complex',
-      filterComplex,
-      '-map',
-      '0:v',
-      '-map',
-      '[aout]',
-      '-c:v',
-      'copy',
-      '-y',
-      outputPath
-    ]);
-
-    ffmpeg.stderr.on('data', (d) => console.log(d.toString()));
-    await new Promise((res, rej) =>
-      ffmpeg.on('close', (code) =>
-        code === 0
-          ? res(null)
-          : rej(new Error(`ffmpeg exited with code ${code}`))
-      )
-    );
-
-    console.log(`Uploading to: ${censoredKey}`);
-    const buffer = readFileSync(outputPath);
+    const finalBuffer = readFileSync(outputPath);
 
     await s3.send(
       new PutObjectCommand({
         Bucket: BUCKET,
-        Key: censoredKey,
-        Body: buffer,
+        Key: outputKey,
+        Body: finalBuffer,
         ContentType: 'video/mp4'
       })
     );
 
-    return logAndReturn({
+    console.log(`✅ Uploaded censored video to: ${outputKey}`);
+
+    return {
       status: 'SUCCESS',
+      outputKey,
       videoKey,
-      transcriptKey,
-      outputKey: censoredKey
-    });
+      transcriptKey
+    };
   } catch (error) {
-    console.error('Audio censorship failed:', error);
+    console.error('❌ Failed to censor audio', error);
     return {
       status: 'FAILED',
       error: (error as Error).message
@@ -111,17 +117,48 @@ export const handler = async (event: any) => {
   }
 };
 
-function validateRequiredFields(fields: Record<string, any>) {
-  const missing = Object.entries(fields)
-    .filter(
-      ([_, value]) =>
-        value === undefined ||
-        value === null ||
-        (Array.isArray(value) && value.length === 0)
-    )
-    .map(([key]) => key);
+export function generateBeepOverlayFilter(
+  segments: { start: string; end: string }[]
+): string {
+  if (!segments.length) throw new Error('No profanity segments provided');
 
-  if (missing.length > 0) {
-    throw new Error(`Missing required fields: ${missing.join(', ')}`);
-  }
+  const prePostPadding = 0.1; // 100ms buffer on either side for cleaner cuts
+  const beepFreq = 1000;
+  const sampleRate = 44100;
+
+  // Construct mute logic and beep overlay filters
+  const muteConditions = segments
+    .map((seg) => {
+      const start = (parseFloat(seg.start) - prePostPadding).toFixed(3);
+      const end = (parseFloat(seg.end) + prePostPadding).toFixed(3);
+      return `between(t,${start},${end})`;
+    })
+    .join('+');
+
+  const filters: string[] = [];
+
+  // Step 1: Apply conditional volume to mute segments
+  filters.push(`[0:a]volume='if(${muteConditions},0,1)'[a0]`);
+
+  // Step 2: For each segment, generate beep sine, delay, and pad
+  segments.forEach((seg, i) => {
+    const start = Math.max(0, parseFloat(seg.start) - prePostPadding);
+    const end = parseFloat(seg.end) + prePostPadding;
+    const duration = (end - start).toFixed(3);
+    const delayMs = Math.floor(start * 1000);
+
+    filters.push(
+      `sine=frequency=${beepFreq}:duration=${duration}:sample_rate=${sampleRate}[s${i}]`,
+      `[s${i}]adelay=${delayMs}|${delayMs},apad[b${i}]`
+    );
+  });
+
+  // Step 3: Mix muted audio and all beeps
+  const amixInputs = ['[a0]', ...segments.map((_, i) => `[b${i}]`)].join('');
+  const mix = `${amixInputs}amix=inputs=${
+    segments.length + 1
+  }:duration=longest:dropout_transition=0[mixed]`;
+  filters.push(mix);
+
+  return filters.join('; ');
 }

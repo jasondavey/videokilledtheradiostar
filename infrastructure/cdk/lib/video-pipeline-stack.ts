@@ -323,7 +323,8 @@ export class VideoPipelineStack extends cdk.Stack {
         UPLOAD_BUCKET: uploadBucket.bucketName
       },
       layers: [ffmpegLayer], // ✅ Assumes FFmpeg layer
-      timeout: cdk.Duration.minutes(1)
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 1024
     });
 
     uploadBucket.grantReadWrite(audioCensorLambda);
@@ -365,8 +366,11 @@ export class VideoPipelineStack extends cdk.Stack {
 
     const checkJob = new tasks.LambdaInvoke(this, 'Check Transcribe Status', {
       lambdaFunction: transcribeStatusCheckLambda,
-      payload: sfn.TaskInput.fromJsonPathAt('$'),
       outputPath: '$.Payload'
+    }).addRetry({
+      maxAttempts: 3,
+      interval: cdk.Duration.seconds(10),
+      backoffRate: 2.0
     });
 
     const jobSucceeded = new sfn.Choice(this, 'Job Complete?');
@@ -432,6 +436,7 @@ export class VideoPipelineStack extends cdk.Stack {
       .next(
         jobSucceeded
           .when(sfn.Condition.stringEquals('$.status', 'IN_PROGRESS'), waitX)
+          .when(sfn.Condition.stringEquals('$.status', 'UNKNOWN'), waitX)
           .when(
             sfn.Condition.stringEquals('$.status', 'FAILED'),
             new sfn.Fail(this, 'Transcribe Failed')
